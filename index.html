@@ -483,11 +483,15 @@
   // ── Portfolio KPI cards ───────────────────────────────────────────────────
   function computePortfolioKpis(rows) {
     var fld = cfg.fieldMappings;
-    var seenBrands = {}, seenLeases = {};
-    var activeBrandCount = 0, activeLeaseCount = 0;
+    var seenBrands = {}, seenLeases = {}, seenLocations = {};
+    var activeBrandCount = 0, activeLeaseCount = 0, assetCount = 0;
     var matSales = 0, priorSales = 0, matRent = 0, totalArea = 0;
 
     rows.forEach(function (row) {
+      // Assets = distinct locations in the portfolio; not gated by tenant status — it's a physical count.
+      var locKey = fld.locationField ? normalizeTenantKey(row[fld.locationField]) : '';
+      if (locKey && !seenLocations[locKey]) { seenLocations[locKey] = true; assetCount++; }
+
       if (isActiveTenantStatus(fld, row)) {
         // Active Brands = distinct Brand Code; falls back to tenant name if unmapped.
         var brandKey = fld.brandCodeField ? normalizeTenantKey(row[fld.brandCodeField])
@@ -512,6 +516,7 @@
     return {
       activeBrandCount:  activeBrandCount,
       activeLeaseCount:  activeLeaseCount,
+      assetCount:        assetCount,
       matSales:          matSales,
       priorSales:        priorSales,
       yoyPct:            priorSales > 0 ? ((matSales - priorSales) / priorSales * 100) : null,
@@ -524,6 +529,7 @@
     $kpiCards.innerHTML = '';
     $kpiCards.appendChild(kpiCardItem('Active Leases', k.activeLeaseCount.toLocaleString(), 'across portfolio'));
     $kpiCards.appendChild(kpiCardItem('Active Brands', k.activeBrandCount.toLocaleString(), 'across portfolio'));
+    $kpiCards.appendChild(kpiCardItem('Assets', k.assetCount.toLocaleString(), 'across portfolio'));
 
     var matSalesCard = kpiCardItem('MAT Sales', formatValue(k.matSales), '');
     if (k.yoyPct !== null) {
@@ -579,9 +585,11 @@
       if (!cat.tenantMap[brandKey]) {
         cat.tenantMap[brandKey] = {
           name:        tenantName,
-          salesIndex:  fld.salesIndexField  ? (row[fld.salesIndexField]  || '') : '',
-          tenantYoy:   fld.tenantYoyField   ? (row[fld.tenantYoyField]   || '') : '',
-          ocr:         fld.ocrField         ? (row[fld.ocrField]         || '') : '',
+          // salesIndex/tenantYoy/ocr are filled in below as a sales-weighted rollup across this brand's stores —
+          // they vary per store, so a single first-row value would misrepresent the brand.
+          salesIndex:  '',
+          tenantYoy:   '',
+          ocr:         '',
           status:      fld.statusField      ? (row[fld.statusField]      || '') : '',
           salesPerSqm: fld.salesPerSqmField ? (row[fld.salesPerSqmField] || '') : '',
           storeCount:  fld.storeCountField  ? (row[fld.storeCountField]  || '') : '',
@@ -612,12 +620,21 @@
         sqm:         fld.sqmField        ? (row[fld.sqmField]        || '') : '',
         leaseValue:  fld.leaseValueField  ? (row[fld.leaseValueField]  || '') : '',
         storeStatus: fld.storeStatusField ? (row[fld.storeStatusField] || '') : '',
+        // Carried per-store so the brand's Sales Index/YoY/OCR can be rolled up as a sales-weighted
+        // average across all of this brand's stores, instead of just the first row encountered.
+        salesIndex:         fld.salesIndexField        ? (row[fld.salesIndexField]        || '') : '',
+        ocr:                fld.ocrField                ? (row[fld.ocrField]                || '') : '',
+        tenantYoy:          fld.tenantYoyField          ? (row[fld.tenantYoyField]          || '') : '',
+        salesCurrentPeriod: fld.salesCurrentPeriodField ? (row[fld.salesCurrentPeriodField]  || '') : '',
+        salesPriorPeriod:   fld.salesPriorPeriodField   ? (row[fld.salesPriorPeriodField]    || '') : '',
+        isActive:           isActiveTenantStatus(fld, row),
       });
     });
 
     return catOrder.map(function (catName) {
       var cat = catMap[catName];
       var tenants = cat.tenantOrder.map(function (tn) { return cat.tenantMap[tn]; });
+      tenants.forEach(applyBrandRollup);
       if (activeSort) {
         tenants = tenants.slice().sort(function (a, b) {
           var av = parseNumeric(a[activeSort]); if (isNaN(av)) av = -Infinity;
@@ -634,6 +651,53 @@
         tenants:           tenants,
       };
     });
+  }
+
+  // Brand/tenant-level rollup: weight each store's metric by its own Sales (AED) rather than
+  // reading a single "representative" row (mirrors arm-vc-rent-roll's salesWeightedAverage/computeBrandYoy).
+  function applyBrandRollup(tenant) {
+    var activeStores = tenant.stores.filter(function (s) { return s.isActive; });
+    if (!activeStores.length) activeStores = tenant.stores; // no active stores found — fall back rather than showing a blank tile
+
+    tenant.salesIndex = salesWeightedAverage(activeStores, 'salesIndex');
+    tenant.ocr        = salesWeightedAverage(activeStores, 'ocr');
+    tenant.tenantYoy  = computeBrandYoy(activeStores);
+  }
+
+  function salesWeightedAverage(stores, metricKey) {
+    var weightedSum = 0, weightTotal = 0, anyValue = false;
+    stores.forEach(function (store) {
+      var metric = parseNumeric(store[metricKey]);
+      if (isNaN(metric)) return;
+      anyValue = true;
+      var weight = parseNumeric(store.salesCurrentPeriod);
+      if (isNaN(weight) || weight <= 0) weight = 0;
+      weightedSum += metric * weight;
+      weightTotal += weight;
+    });
+    if (!anyValue) return '';
+    if (weightTotal > 0) return weightedSum / weightTotal;
+    // No usable weights (e.g. Sales unmapped/zero for every store) — fall back to a plain average.
+    var vals = stores.map(function (store) { return parseNumeric(store[metricKey]); }).filter(function (n) { return !isNaN(n); });
+    return vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+  }
+
+  // If Sales — Prior Period is mapped, compute (sum current − sum prior) ÷ sum prior across the
+  // brand's active stores — mathematically correct. Otherwise fall back to a sales-weighted average
+  // of each store's own YoY%.
+  function computeBrandYoy(activeStores) {
+    var hasPrior = activeStores.some(function (s) { return s.salesPriorPeriod !== ''; });
+    if (!hasPrior) return salesWeightedAverage(activeStores, 'tenantYoy');
+
+    var sumCurrent = 0, sumPrior = 0, any = false;
+    activeStores.forEach(function (store) {
+      var cur   = parseNumeric(store.salesCurrentPeriod);
+      var prior = parseNumeric(store.salesPriorPeriod);
+      if (!isNaN(cur)) { sumCurrent += cur; any = true; }
+      if (!isNaN(prior)) sumPrior += prior;
+    });
+    if (!any || sumPrior <= 0) return '';
+    return ((sumCurrent - sumPrior) / sumPrior) * 100;
   }
 
   // ── Filters ───────────────────────────────────────────────────────────────
@@ -1091,8 +1155,8 @@
         tdSalesIndex +
         (showSalesCurrent ? '<td>' + esc(formatValue(tenant.salesCurrentPeriod)) + '</td>' : '') +
         (showSalesPerSqm  ? '<td>' + esc(tenant.salesPerSqm || '—') + '</td>' : '') +
-        (showYoy ? '<td><span class="' + (yoyCls || '') + '">' + esc(tenant.tenantYoy || '—') + '</span></td>' : '') +
-        (showOcr ? '<td>' + esc(tenant.ocr || '—') + '</td>' : '') +
+        (showYoy ? '<td><span class="' + (yoyCls || '') + '">' + esc(formatPercentSigned(tenant.tenantYoy)) + '</span></td>' : '') +
+        (showOcr ? '<td>' + esc(formatPercentPlain(tenant.ocr, 1)) + '</td>' : '') +
         (showStores ? '<td>' + esc(String(tenant.storeCount || tenant.stores.length)) + '</td>' : '') +
         tdStatus;
 
@@ -1127,8 +1191,8 @@
 
     var kpiTiles = [
       kpiTile('Sales Index', isNaN(siNum) ? '—' : Math.round(siNum), 'vs portfolio 100', true),
-      '<div class="kpi-tile"><div class="kpi-label">YOY GROWTH</div><div class="kpi-value"' + (yoyStyle ? ' style="' + yoyStyle + '"' : '') + '>' + esc(tenant.tenantYoy || '—') + '</div></div>',
-      kpiTile('OCR', tenant.ocr || '—', ''),
+      '<div class="kpi-tile"><div class="kpi-label">YOY GROWTH</div><div class="kpi-value"' + (yoyStyle ? ' style="' + yoyStyle + '"' : '') + '>' + esc(formatPercentSigned(tenant.tenantYoy)) + '</div></div>',
+      kpiTile('OCR', formatPercentPlain(tenant.ocr, 1), ''),
       kpiTile('Stores', String(tenant.storeCount || tenant.stores.length), ''),
     ];
     if (cfg.fieldMappings.salesCurrentPeriodField) {
@@ -1136,9 +1200,9 @@
     }
 
     var storeListHtml = tenant.stores.map(function (store) {
-      var storeStatusCls = (store.storeStatus || '').toLowerCase() === 'active' ? 'active' : 'inactive';
+      var storeStatusCls = isActiveStatusValue(store.storeStatus) ? 'active' : 'inactive';
       var metaParts = [];
-      if (store.leaseEnd) metaParts.push('Lease ends ' + store.leaseEnd);
+      if (store.leaseEnd) metaParts.push('Lease End Date: ' + store.leaseEnd);
       if (store.sqm)      metaParts.push(store.sqm + ' sqm');
       var valueHtml  = store.leaseValue ? '<span class="store-value-text">' + esc(formatValue(store.leaseValue)) + '</span>' : '';
       var statusHtml = store.storeStatus ? '<span class="store-status-badge ' + storeStatusCls + '">' + esc(store.storeStatus) + '</span>' : '';
@@ -1206,10 +1270,32 @@
     return String(name || '').trim().replace(/\s+/g, ' ').toUpperCase();
   }
 
+  // Blocklist rather than allowlist — robust to whatever wording a real status column uses
+  // (Current, Renewed, Month-to-month, ... all count as active unless explicitly flagged otherwise).
+  var INACTIVE_STATUS_VALUES = ['inactive', 'past', 'expired', 'terminated', 'closed', 'no'];
+  function isActiveStatusValue(raw) {
+    var s = String(raw || '').trim().toLowerCase();
+    if (!s) return true;
+    return INACTIVE_STATUS_VALUES.indexOf(s) === -1;
+  }
+
   // Gates Active Leases / Active Brands / Tracked Tenants counting. No Tenant Status mapped => count everything.
   function isActiveTenantStatus(fld, row) {
     if (!fld.tenantStatusField) return true;
-    return normalizeTenantKey(row[fld.tenantStatusField]) === 'CURRENT';
+    return isActiveStatusValue(row[fld.tenantStatusField]);
+  }
+
+  // tenantYoy/ocr are now computed numbers (sales-weighted rollups), not pre-formatted source strings.
+  function formatPercentSigned(raw, digits) {
+    var n = parseNumeric(raw);
+    if (isNaN(n)) return raw || '—';
+    var sign = n > 0 ? '+' : '';
+    return sign + n.toFixed(digits === undefined ? 1 : digits) + '%';
+  }
+  function formatPercentPlain(raw, digits) {
+    var n = parseNumeric(raw);
+    if (isNaN(n)) return raw || '—';
+    return n.toFixed(digits === undefined ? 1 : digits) + '%';
   }
 
   function formatValue(raw) {
@@ -1260,8 +1346,8 @@
 
     rawRows = [
       // F&B
-      { Category:'Food & Beverage', 'Active Leases':'42', 'Cat Sales/SqFt':'AED 3,820', 'Cat YoY':'+8.2%', Tenant:'The Noodle House',    'Sales Index':'152', 'Sales Current':'9120000', 'Tenant YoY':'+12.4%', OCR:'8.1%', Status:'TOP QUARTILE', Location:'Yas Mall',       Level:'GF', 'Lease End':'Dec 2026', SQM:'180', 'Lease Value':'1,650,000', 'Store Status':'Active' },
-      { Category:'Food & Beverage', 'Active Leases':'42', 'Cat Sales/SqFt':'AED 3,820', 'Cat YoY':'+8.2%', Tenant:'The Noodle House',    'Sales Index':'152', 'Sales Current':'9120000', 'Tenant YoY':'+12.4%', OCR:'8.1%', Status:'TOP QUARTILE', Location:'Al Jimi Mall',    Level:'LG', 'Lease End':'Mar 2027', SQM:'210', 'Lease Value':'1,950,000', 'Store Status':'Active' },
+      { Category:'Food & Beverage', 'Active Leases':'42', 'Cat Sales/SqFt':'AED 3,820', 'Cat YoY':'+8.2%', Tenant:'The Noodle House',    'Sales Index':'152', 'Sales Current':'9120000', 'Tenant YoY':'+12.4%', OCR:'8.1%',  Status:'TOP QUARTILE', Location:'Yas Mall',       Level:'GF', 'Lease End':'Dec 2026', SQM:'180', 'Lease Value':'1,650,000', 'Store Status':'Active' },
+      { Category:'Food & Beverage', 'Active Leases':'42', 'Cat Sales/SqFt':'AED 3,820', 'Cat YoY':'+8.2%', Tenant:'The Noodle House',    'Sales Index':'90',  'Sales Current':'3000000', 'Tenant YoY':'+2.0%',  OCR:'15.0%', Status:'TOP QUARTILE', Location:'Al Jimi Mall',    Level:'LG', 'Lease End':'Mar 2027', SQM:'210', 'Lease Value':'1,950,000', 'Store Status':'Active' },
       { Category:'Food & Beverage', 'Active Leases':'42', 'Cat Sales/SqFt':'AED 3,820', 'Cat YoY':'+8.2%', Tenant:'Shake Shack',         'Sales Index':'138', 'Sales Current':'8280000', 'Tenant YoY':'+6.7%',  OCR:'9.4%', Status:'TOP QUARTILE', Location:'Yas Mall',       Level:'FF', 'Lease End':'Jun 2025', SQM:'145', 'Lease Value':'1,200,000', 'Store Status':'Active' },
       { Category:'Food & Beverage', 'Active Leases':'42', 'Cat Sales/SqFt':'AED 3,820', 'Cat YoY':'+8.2%', Tenant:'Gourmet Gulf',        'Sales Index':'109', 'Sales Current':'6540000', 'Tenant YoY':'+3.1%',  OCR:'10.2%',Status:'WATCH',        Location:'World Trade Ctr', Level:'GF', 'Lease End':'Aug 2025', SQM:'320', 'Lease Value':'2,800,000', 'Store Status':'Active' },
       { Category:'Food & Beverage', 'Active Leases':'42', 'Cat Sales/SqFt':'AED 3,820', 'Cat YoY':'+8.2%', Tenant:'Zaytoun Kitchen',     'Sales Index':'96',  'Sales Current':'5760000', 'Tenant YoY':'-1.8%',  OCR:'12.5%',Status:'AT RISK',      Location:'Dalma Mall',     Level:'GF', 'Lease End':'Feb 2025', SQM:'240', 'Lease Value':'2,100,000', 'Store Status':'Active' },
