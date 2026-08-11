@@ -527,9 +527,9 @@
 
   function renderKpiCards(k) {
     $kpiCards.innerHTML = '';
+    $kpiCards.appendChild(kpiCardItem('Assets', k.assetCount.toLocaleString(), 'across portfolio'));
     $kpiCards.appendChild(kpiCardItem('Active Leases', k.activeLeaseCount.toLocaleString(), 'across portfolio'));
     $kpiCards.appendChild(kpiCardItem('Active Brands', k.activeBrandCount.toLocaleString(), 'across portfolio'));
-    $kpiCards.appendChild(kpiCardItem('Assets', k.assetCount.toLocaleString(), 'across portfolio'));
 
     var matSalesCard = kpiCardItem('MAT Sales', formatValue(k.matSales), '');
     if (k.yoyPct !== null) {
@@ -662,6 +662,20 @@
     tenant.salesIndex = salesWeightedAverage(activeStores, 'salesIndex');
     tenant.ocr        = salesWeightedAverage(activeStores, 'ocr');
     tenant.tenantYoy  = computeBrandYoy(activeStores);
+  }
+
+  // Primary Location = the brand's highest-sales active store, not just whichever row came first.
+  function pickPrimaryStore(stores) {
+    if (!stores.length) return null;
+    var activeStores = stores.filter(function (s) { return s.isActive; });
+    var pool = activeStores.length ? activeStores : stores;
+    var best = pool[0], bestSales = -Infinity;
+    pool.forEach(function (store) {
+      var sales = parseNumeric(store.salesCurrentPeriod);
+      if (isNaN(sales)) sales = -Infinity;
+      if (sales > bestSales) { bestSales = sales; best = store; }
+    });
+    return best;
   }
 
   function salesWeightedAverage(stores, metricKey) {
@@ -1123,7 +1137,8 @@
     var tbody = document.createElement('tbody');
     cat.tenants.forEach(function (tenant) {
       var tr = document.createElement('tr');
-      var primaryLoc = tenant.stores.length > 0 ? tenant.stores[0].location : '';
+      var primaryStore = pickPrimaryStore(tenant.stores);
+      var primaryLoc = primaryStore ? primaryStore.location : '';
       var siNum   = parseNumeric(tenant.salesIndex);
       var barPct  = isNaN(siNum) ? 0 : Math.min(siNum / BAR_SCALE * 100, 100);
       var barColor = getSalesIndexColor(siNum);
@@ -1202,6 +1217,7 @@
     var storeListHtml = tenant.stores.map(function (store) {
       var storeStatusCls = isActiveStatusValue(store.storeStatus) ? 'active' : 'inactive';
       var metaParts = [];
+      if (store.salesCurrentPeriod) metaParts.push('Sales: ' + formatValue(store.salesCurrentPeriod));
       if (store.leaseEnd) metaParts.push('Lease End Date: ' + store.leaseEnd);
       if (store.sqm)      metaParts.push(store.sqm + ' sqm');
       var valueHtml  = store.leaseValue ? '<span class="store-value-text">' + esc(formatValue(store.leaseValue)) + '</span>' : '';
