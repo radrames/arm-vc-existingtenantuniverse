@@ -38,18 +38,20 @@
     { id: 'lbl-status',        key: 'statusLabel',       def: 'Status',        visId: 'vis-status',        visKey: 'statusVisible' },
   ];
 
-  var FILTER_FIELDS = [
-    { value: 'categoryField',   label: 'Category' },
-    { value: 'tenantField',     label: 'Tenant' },
-    { value: 'statusField',     label: 'Status' },
-    { value: 'locationField',   label: 'Location' },
-    { value: 'levelField',      label: 'Level' },
-    { value: 'storeStatusField',label: 'Store Status' },
+  var KPI_TOOLTIP_KEYS = [
+    { id: 'tip-assets',            key: 'assets' },
+    { id: 'tip-active-leases',     key: 'activeLeases' },
+    { id: 'tip-active-brands',     key: 'activeBrands' },
+    { id: 'tip-mat-sales',         key: 'matSales' },
+    { id: 'tip-portfolio-ocr',     key: 'portfolioOcr' },
+    { id: 'tip-avg-sales-per-sqm', key: 'avgSalesPerSqm' },
   ];
 
   var MAX_FILTERS = 6;
   var filterRows  = [];
   var filterIdSeq = 0;
+  // Raw worksheet columns (any dimension, not just ones with a dedicated field mapping) — populated by loadCols().
+  var sourceCols  = [];
 
   window.addEventListener('load', function () {
     tableau.extensions.initializeDialogAsync().then(function () {
@@ -99,8 +101,34 @@
     if (!ws) { clearFieldSelects(); return; }
     ws.getSummaryDataAsync({ maxRows: 1 }).then(function (dt) {
       var cols = dt.columns.map(function (c) { return c.fieldName; }).sort();
+      var dateCols = dt.columns.filter(function (c) {
+        return c.dataType === 'date' || c.dataType === 'date-time';
+      }).map(function (c) { return c.fieldName; }).sort();
+      sourceCols = cols;
       fillFieldSelects(cols);
+      fillDateFieldSelect(dateCols.length ? dateCols : cols);
+      if (filterRows.length) renderFilterList();
     }).catch(function () { clearFieldSelects(); });
+  }
+
+  function fillDateFieldSelect(cols) {
+    var sel = document.getElementById('date-filter-field');
+    if (!sel) return;
+    var prev = sel.value;
+    var firstOpt = sel.options[0];
+    sel.innerHTML = '';
+    sel.appendChild(firstOpt);
+    cols.forEach(function (col) {
+      var opt = document.createElement('option');
+      opt.value = col; opt.textContent = col;
+      sel.appendChild(opt);
+    });
+    if (prev) {
+      var exists = false;
+      for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === prev) { exists = true; break; } }
+      if (!exists) sel.appendChild(new Option(prev, prev));
+      sel.value = prev;
+    }
   }
 
   function clearFieldSelects() {
@@ -175,6 +203,13 @@
       } catch (e) {}
     }
 
+    if (all.kpiTooltips) {
+      try {
+        var kt = JSON.parse(all.kpiTooltips);
+        KPI_TOOLTIP_KEYS.forEach(function (item) { setVal(item.id, kt[item.key] || ''); });
+      } catch (e) {}
+    }
+
     if (all.bands) {
       try {
         var bands = JSON.parse(all.bands);
@@ -188,7 +223,17 @@
         var fc = JSON.parse(all.filterConfig);
         if (fc.dateFilter) {
           setCheck('date-filter-enabled', !!fc.dateFilter.enabled);
-          if (fc.dateFilter.field)         setVal('date-filter-field',   fc.dateFilter.field);
+          // Inject the saved value as an option before setting it — the real column list may not have
+          // loaded yet (loadCols() above is async), and setting .value to an unknown option is a no-op.
+          if (fc.dateFilter.field) {
+            var dateSel = document.getElementById('date-filter-field');
+            if (dateSel) {
+              var dateOptExists = false;
+              for (var di = 0; di < dateSel.options.length; di++) { if (dateSel.options[di].value === fc.dateFilter.field) { dateOptExists = true; break; } }
+              if (!dateOptExists) dateSel.appendChild(new Option(fc.dateFilter.field, fc.dateFilter.field));
+            }
+            setVal('date-filter-field', fc.dateFilter.field);
+          }
           if (fc.dateFilter.label)         setVal('date-filter-label',   fc.dateFilter.label);
           if (fc.dateFilter.defaultPreset) setVal('date-filter-default', fc.dateFilter.defaultPreset);
           toggleDateFilterSettings();
@@ -244,10 +289,15 @@
       fieldSel.id = 'ff-field-' + row.id;
       var defOpt = document.createElement('option'); defOpt.value = ''; defOpt.textContent = '— field —';
       fieldSel.appendChild(defOpt);
-      FILTER_FIELDS.forEach(function (f) {
-        var opt = document.createElement('option'); opt.value = f.value; opt.textContent = f.label;
+      sourceCols.forEach(function (col) {
+        var opt = document.createElement('option'); opt.value = col; opt.textContent = col;
         fieldSel.appendChild(opt);
       });
+      // Legacy filters saved a fieldMappings key (e.g. "locationField") instead of a raw column name,
+      // or the worksheet's columns just haven't loaded yet — keep the saved value visible either way.
+      if (row.field && sourceCols.indexOf(row.field) === -1) {
+        fieldSel.appendChild(new Option(row.field, row.field));
+      }
       fieldSel.value = row.field || '';
       fieldSel.addEventListener('change', function () { row.field = fieldSel.value; });
 
@@ -292,6 +342,9 @@
     var cv = {};
     COLUMN_LABEL_KEYS.forEach(function (item) { if (item.visKey) cv[item.visKey] = getCheck(item.visId); });
 
+    var kt = {};
+    KPI_TOOLTIP_KEYS.forEach(function (item) { kt[item.key] = getVal(item.id).trim(); });
+
     var bands = [
       { color: '#2E7D32', threshold: highT, label: 'High' },
       { color: '#D4782F', threshold: midT,  label: 'Medium' },
@@ -323,6 +376,7 @@
     tableau.extensions.settings.set('fieldMappings',    JSON.stringify(fm));
     tableau.extensions.settings.set('columnLabels',     JSON.stringify(cl));
     tableau.extensions.settings.set('columnVisibility', JSON.stringify(cv));
+    tableau.extensions.settings.set('kpiTooltips',      JSON.stringify(kt));
     tableau.extensions.settings.set('bands',            JSON.stringify(bands));
     tableau.extensions.settings.set('filterConfig',     JSON.stringify(fc));
 

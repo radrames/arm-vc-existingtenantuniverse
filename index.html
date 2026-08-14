@@ -44,17 +44,37 @@
       display: flex; flex-shrink: 0;
       background: var(--surface); border-top: 3px solid var(--accent); border-bottom: 1px solid var(--border);
     }
-    .kpi-card-item { flex: 1; min-width: 0; padding: 14px 20px; border-left: 1px solid var(--border); }
+    .kpi-card-item { position: relative; flex: 1; min-width: 0; padding: 14px 20px; border-left: 1px solid var(--border); }
     .kpi-card-item:first-child { border-left: none; }
     .kpi-card-label {
       font-size: 10px; font-weight: 600; text-transform: uppercase;
-      letter-spacing: .07em; color: var(--text-muted); margin-bottom: 6px;
+      letter-spacing: .07em; color: var(--text-muted); margin-bottom: 6px; padding-right: 16px;
     }
     .kpi-card-value { font-size: 26px; font-weight: 700; color: var(--text); line-height: 1.1; }
     .kpi-card-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
     .kpi-card-delta { font-size: 12px; font-weight: 600; margin-top: 4px; line-height: 1.4; }
     .kpi-card-delta.up   { color: #2E7D32; }
     .kpi-card-delta.down { color: var(--danger); }
+
+    /* ── KPI info tooltip ── */
+    .kpi-info-wrap { position: absolute; top: 12px; right: 12px; }
+    .kpi-info-btn {
+      width: 16px; height: 16px; border-radius: 50%; border: none; padding: 0;
+      background: rgba(212,120,47,.15); color: var(--accent);
+      font-size: 10px; font-weight: 700; font-style: italic; font-family: Georgia, 'Times New Roman', serif;
+      display: flex; align-items: center; justify-content: center; cursor: default;
+    }
+    .kpi-info-btn:hover, .kpi-info-btn:focus { background: rgba(212,120,47,.28); outline: none; }
+    .kpi-tooltip {
+      position: absolute; top: 22px; right: 0; width: 230px;
+      background: var(--text); color: #fff; font-size: 11px; line-height: 1.5;
+      padding: 9px 11px; border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.18);
+      opacity: 0; visibility: hidden; transform: translateY(-4px);
+      transition: opacity .14s, transform .14s; z-index: 30; pointer-events: none;
+    }
+    .kpi-info-wrap:hover .kpi-tooltip, .kpi-info-btn:focus + .kpi-tooltip {
+      opacity: 1; visibility: visible; transform: translateY(0);
+    }
 
     /* ── Filter bar ── */
     #filter-bar {
@@ -356,6 +376,7 @@
       salesIndexVisible: true, salesCurrentVisible: true, salesPerSqmVisible: true,
       yoyVisible: true, ocrVisible: true, storesVisible: true, statusVisible: true,
     },
+    kpiTooltips: {},
     bands: [
       { color: '#2E7D32', threshold: 130 },
       { color: '#D4782F', threshold: 100 },
@@ -426,6 +447,7 @@
       if (all.fieldMappings)    cfg.fieldMappings    = JSON.parse(all.fieldMappings);
       if (all.columnLabels)     cfg.columnLabels     = JSON.parse(all.columnLabels);
       if (all.columnVisibility) cfg.columnVisibility = JSON.parse(all.columnVisibility);
+      if (all.kpiTooltips)      cfg.kpiTooltips      = JSON.parse(all.kpiTooltips);
       if (all.bands)            cfg.bands            = JSON.parse(all.bands);
       if (all.filterConfig)     cfg.filterConfig     = JSON.parse(all.filterConfig);
     } catch (e) {}
@@ -525,13 +547,26 @@
     };
   }
 
+  var KPI_TOOLTIP_DEFAULTS = {
+    assets:          'Count of distinct locations (malls/properties) across the portfolio — a physical site count, not filtered by tenant status.',
+    activeLeases:    'Count of distinct Tenant Codes among rows where Tenant Status = Current. Falls back to counting every row if Tenant Code isn\'t mapped.',
+    activeBrands:    'Count of distinct Brand Codes with at least one Current-status lease. Falls back to counting distinct tenant names if Brand Code isn\'t mapped.',
+    matSales:        'MAT = Moving Annual Turnover — sum of Sales (AED) across all rows. The % shown is (MAT Sales − Sales Prior Period) ÷ Sales Prior Period.',
+    portfolioOcr:    'OCR = Occupancy Cost Ratio — total MAT Rent divided by total Sales (AED) across the portfolio.',
+    avgSalesPerSqm:  'Total Sales (AED) divided by total Store Area (sqm) across the portfolio.',
+  };
+  function kpiTooltip(key) {
+    var t = cfg.kpiTooltips || {};
+    return (t[key] && t[key].trim()) || KPI_TOOLTIP_DEFAULTS[key];
+  }
+
   function renderKpiCards(k) {
     $kpiCards.innerHTML = '';
-    $kpiCards.appendChild(kpiCardItem('Assets', k.assetCount.toLocaleString(), 'across portfolio'));
-    $kpiCards.appendChild(kpiCardItem('Active Leases', k.activeLeaseCount.toLocaleString(), 'across portfolio'));
-    $kpiCards.appendChild(kpiCardItem('Active Brands', k.activeBrandCount.toLocaleString(), 'across portfolio'));
+    $kpiCards.appendChild(kpiCardItem('Assets', k.assetCount.toLocaleString(), 'across portfolio', 'assets'));
+    $kpiCards.appendChild(kpiCardItem('Active Leases', k.activeLeaseCount.toLocaleString(), 'across portfolio', 'activeLeases'));
+    $kpiCards.appendChild(kpiCardItem('Active Brands', k.activeBrandCount.toLocaleString(), 'across portfolio', 'activeBrands'));
 
-    var matSalesCard = kpiCardItem('MAT Sales', formatValue(k.matSales), '');
+    var matSalesCard = kpiCardItem('MAT Sales', formatValue(k.matSales), '', 'matSales');
     if (k.yoyPct !== null) {
       var isUp = k.yoyPct >= 0;
       var delta = document.createElement('div');
@@ -541,13 +576,23 @@
     }
     $kpiCards.appendChild(matSalesCard);
 
-    $kpiCards.appendChild(kpiCardItem('Portfolio OCR', k.ocrPct !== null ? k.ocrPct.toFixed(1) + '%' : '—', ''));
-    $kpiCards.appendChild(kpiCardItem('Avg Sales/Sqm', k.avgSalesPerSqm !== null ? formatValue(k.avgSalesPerSqm) : '—', ''));
+    $kpiCards.appendChild(kpiCardItem('Portfolio OCR', k.ocrPct !== null ? k.ocrPct.toFixed(1) + '%' : '—', '', 'portfolioOcr'));
+    $kpiCards.appendChild(kpiCardItem('Avg Sales/Sqm', k.avgSalesPerSqm !== null ? formatValue(k.avgSalesPerSqm) : '—', '', 'avgSalesPerSqm'));
   }
 
-  function kpiCardItem(label, value, sub) {
+  function kpiCardItem(label, value, sub, tooltipKey) {
     var item = document.createElement('div');
     item.className = 'kpi-card-item';
+    if (tooltipKey) {
+      var infoWrap = document.createElement('div'); infoWrap.className = 'kpi-info-wrap';
+      var infoBtn = document.createElement('button');
+      infoBtn.className = 'kpi-info-btn'; infoBtn.type = 'button'; infoBtn.tabIndex = 0;
+      infoBtn.setAttribute('aria-label', 'About ' + label); infoBtn.textContent = 'i';
+      var tip = document.createElement('div'); tip.className = 'kpi-tooltip'; tip.setAttribute('role', 'tooltip');
+      tip.textContent = kpiTooltip(tooltipKey);
+      infoWrap.appendChild(infoBtn); infoWrap.appendChild(tip);
+      item.appendChild(infoWrap);
+    }
     var lbl = document.createElement('div'); lbl.className = 'kpi-card-label'; lbl.textContent = label;
     var val = document.createElement('div'); val.className = 'kpi-card-value'; val.textContent = value;
     item.appendChild(lbl); item.appendChild(val);
@@ -724,18 +769,25 @@
     (fc.filters || []).forEach(function (def) { activeFilters[def.id] = []; });
   }
 
+  // Filters store either a raw worksheet column name (current) or a legacy fieldMappings key
+  // like "locationField" (older saved configs) — resolve whichever this is to an actual column name.
+  function resolveFilterColumn(fld, fieldRef) {
+    if (!fieldRef) return '';
+    return fld.hasOwnProperty(fieldRef) ? (fld[fieldRef] || '') : fieldRef;
+  }
+
   function applyFilters(rows) {
     var fc  = cfg.filterConfig || {};
     var fld = cfg.fieldMappings || {};
     var out = rows;
     if (fc.dateFilter && fc.dateFilter.enabled && activeFilters.date) {
-      var colName = fld[fc.dateFilter.field];
+      var colName = resolveFilterColumn(fld, fc.dateFilter.field);
       if (colName) out = applyDateFilter(out, colName, activeFilters.date.preset, activeFilters.date.from, activeFilters.date.to);
     }
     (fc.filters || []).forEach(function (def) {
       var sel = activeFilters[def.id];
       if (!sel || !sel.length) return;
-      var colName = fld[def.field];
+      var colName = resolveFilterColumn(fld, def.field);
       if (!colName) return;
       out = out.filter(function (row) { return sel.indexOf(String(row[colName] || '')) >= 0; });
     });
@@ -939,7 +991,7 @@
       if (currentDropdownEl && pill.classList.contains('open')) { closeDropdown(); return; }
       closeDropdown(); pill.classList.add('open');
       var fld     = cfg.fieldMappings || {};
-      var colName = fld[def.field];
+      var colName = resolveFilterColumn(fld, def.field);
       var values  = colName ? getUniqueValues(colName) : [];
       var isMulti = def.type !== 'single';
       var dropdown = document.createElement('div'); dropdown.className = 'filter-dropdown';

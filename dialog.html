@@ -25,6 +25,7 @@
     <button class="ctab" data-tab="bands">Bands</button>
     <button class="ctab" data-tab="filters">Filters</button>
     <button class="ctab" data-tab="columns">Columns</button>
+    <button class="ctab" data-tab="kpi-info">KPI Info</button>
   </div>
 
   <div id="config-body">
@@ -336,6 +337,41 @@
       </div>
 
     </div><!-- /tab-columns -->
+
+    <!-- ── Tab: KPI Info ── -->
+    <div class="tab-pane" id="tab-kpi-info">
+
+      <div class="section-title">KPI Card Tooltips</div>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.5;">
+        Shown when a user hovers the "i" icon on each KPI card. Leave blank to use the default text.
+      </p>
+
+      <div class="field-group">
+        <label>Assets</label>
+        <textarea id="tip-assets" rows="3" placeholder="Count of distinct locations (malls/properties) across the portfolio — a physical site count, not filtered by tenant status."></textarea>
+      </div>
+      <div class="field-group">
+        <label>Active Leases</label>
+        <textarea id="tip-active-leases" rows="3" placeholder="Count of distinct Tenant Codes among rows where Tenant Status = Current. Falls back to counting every row if Tenant Code isn't mapped."></textarea>
+      </div>
+      <div class="field-group">
+        <label>Active Brands</label>
+        <textarea id="tip-active-brands" rows="3" placeholder="Count of distinct Brand Codes with at least one Current-status lease. Falls back to counting distinct tenant names if Brand Code isn't mapped."></textarea>
+      </div>
+      <div class="field-group">
+        <label>MAT Sales</label>
+        <textarea id="tip-mat-sales" rows="3" placeholder="MAT = Moving Annual Turnover — sum of Sales (AED) across all rows. The % shown is (MAT Sales − Sales Prior Period) ÷ Sales Prior Period."></textarea>
+      </div>
+      <div class="field-group">
+        <label>Portfolio OCR</label>
+        <textarea id="tip-portfolio-ocr" rows="3" placeholder="OCR = Occupancy Cost Ratio — total MAT Rent divided by total Sales (AED) across the portfolio."></textarea>
+      </div>
+      <div class="field-group">
+        <label>Avg Sales/Sqm</label>
+        <textarea id="tip-avg-sales-per-sqm" rows="3" placeholder="Total Sales (AED) divided by total Store Area (sqm) across the portfolio."></textarea>
+      </div>
+
+    </div><!-- /tab-kpi-info -->
 
   </div><!-- /config-body -->
 
